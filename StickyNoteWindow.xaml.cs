@@ -111,6 +111,7 @@ public partial class StickyNoteWindow : Window
         Left = data.Left;
         Top = data.Top;
         Width = data.Width;
+        Height = data.Height;
 
         // 离屏检测（比如外接显示器被拔）：拉回主屏工作区中央，只调位置不动尺寸
         if (!IsOnAnyScreen(data.Left, data.Top, data.Width, data.Height))
@@ -184,19 +185,21 @@ public partial class StickyNoteWindow : Window
             xaml = Encoding.UTF8.GetString(ms.ToArray());
         }
 
-        return new NoteData
+        var note = new NoteData
         {
             Id = _noteId,
             XamlContent = xaml,
             Left = Left,
             Top = Top,
             Width = Width,
-            Height = _isCollapsed ? _expandedHeight : Height, // 折叠时存原高
+            Height = _isCollapsed ? _expandedHeight : Height,
             BgColor = _bgColor,
             TitleBarColor = _titleBarColor,
             IsPinned = Topmost,
             IsCollapsed = _isCollapsed
         };
+
+        return note;
     }
 
     private void NotifyNoteStateChanged()
@@ -385,8 +388,10 @@ public partial class StickyNoteWindow : Window
     private void HandleResizeMove(MouseEventArgs e)
     {
         var currentScreenPos = PointToScreen(e.GetPosition(this));
-        double deltaX = currentScreenPos.X - _startScreenPos.X;
-        double deltaY = currentScreenPos.Y - _startScreenPos.Y;
+        // PointToScreen 返回物理像素，必须换算为 DIU 才能和 _startWidth 等相加
+        var m = GetTransformFromDevice();
+        double deltaX = (currentScreenPos.X - _startScreenPos.X) * m.M11;
+        double deltaY = (currentScreenPos.Y - _startScreenPos.Y) * m.M22;
 
         double newLeft = _startLeft;
         double newTop = _startTop;
