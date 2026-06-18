@@ -240,20 +240,13 @@ public partial class App : System.Windows.Application
         }
         else
         {
-            // 新建模式：屏幕居中 + 偏移
-            var screen = WinScreen.PrimaryScreen;
-            if (screen != null)
-            {
-                double centerX = (screen.WorkingArea.Width - window.Width) / 2;
-                double centerY = (screen.WorkingArea.Height - window.Height) / 2;
-                window.Left = centerX + _nextOffset;
-                window.Top = centerY + _nextOffset;
-                _nextOffset = (_nextOffset + 30) % 300;
-            }
-            else
-            {
-                window.WindowStartupLocation = WindowStartupLocation.CenterScreen;
-            }
+            // 新建模式：主屏工作区居中 + 偏移（SystemParameters 已是 DIU）
+            var wa = System.Windows.SystemParameters.WorkArea;
+            double centerX = wa.Left + (wa.Width - window.Width) / 2;
+            double centerY = wa.Top + (wa.Height - window.Height) / 2;
+            window.Left = centerX + _nextOffset;
+            window.Top = centerY + _nextOffset;
+            _nextOffset = (_nextOffset + 30) % 300;
         }
 
         // 状态变化 → 防抖保存

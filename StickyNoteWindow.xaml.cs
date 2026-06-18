@@ -15,6 +15,8 @@ using Brushes = System.Windows.Media.Brushes;
 using Rectangle = System.Windows.Shapes.Rectangle;
 using Button = System.Windows.Controls.Button;
 using DataFormats = System.Windows.DataFormats;
+using WinScreen = System.Windows.Forms.Screen;
+using Size = System.Windows.Size;
 
 namespace StickyNotes;
 
@@ -38,6 +40,7 @@ public partial class StickyNoteWindow : Window
     private string _bgColor = "#E8C547";
     private string _titleBarColor = "#C9A820";
     private bool _isRestoring;                       // 恢复中，抑制保存事件
+    private bool _isClamping;                        // 钳制中，防止递归
     private NoteData? _pendingRestore;               // 待恢复的数据（Loaded 时消费）
 
     /// <summary>任何状态变化时触发，外部订阅做防抖保存。</summary>
@@ -65,19 +68,28 @@ public partial class StickyNoteWindow : Window
         // 正文变化 → 通知保存
         ContentBox.TextChanged += (_, _) => NotifyNoteStateChanged();
 
-        // 窗口移动/缩放 → 通知保存
-        LocationChanged += (_, _) => NotifyNoteStateChanged();
+        // 窗口移动/缩放 → 通知保存 + 边界钳制
+        LocationChanged += (_, _) =>
+        {
+            NotifyNoteStateChanged();
+            ClampToScreen();
+        };
         SizeChanged += (_, _) => NotifyNoteStateChanged();
 
         // 消费待恢复数据
         if (_pendingRestore != null)
         {
-            _isRestoring = true;
             RestoreContentAndState(_pendingRestore);
-            _isRestoring = false;
         }
 
         ContentBox.Focus();
+
+        // 所有初始布局完成后：解除恢复锁定 + 做一次轻量适应（换小屏时缩回工作区）
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            _isRestoring = false;
+            ClampToScreen();
+        }), System.Windows.Threading.DispatcherPriority.Loaded);
     }
 
     // ============ 持久化 ============
@@ -85,6 +97,12 @@ public partial class StickyNoteWindow : Window
     /// <summary>在窗口 Show 之前调用，设置位置/尺寸/颜色。</summary>
     public void ApplyLayoutData(NoteData data)
     {
+        // 覆盖 XAML 默认值，防止 Show() 时 WPF 居中覆盖已设置坐标
+        WindowStartupLocation = WindowStartupLocation.Manual;
+
+        // 恢复期间抑制边界钳制和自动保存
+        _isRestoring = true;
+
         _noteId = data.Id;
         _bgColor = data.BgColor;
         _titleBarColor = data.TitleBarColor;
@@ -93,6 +111,14 @@ public partial class StickyNoteWindow : Window
         Left = data.Left;
         Top = data.Top;
         Width = data.Width;
+
+        // 离屏检测（比如外接显示器被拔）：拉回主屏工作区中央，只调位置不动尺寸
+        if (!IsOnAnyScreen(data.Left, data.Top, data.Width, data.Height))
+        {
+            var primaryWa = GetPrimaryWorkingAreaInDiu();
+            Left = primaryWa.Left + (primaryWa.Width - data.Width) / 2;
+            Top = primaryWa.Top + (primaryWa.Height - data.Height) / 2;
+        }
 
         if (data.IsPinned)
         {
@@ -350,9 +376,12 @@ public partial class StickyNoteWindow : Window
         _isResizing = false;
         ReleaseMouseCapture();
         e.Handled = true;
+
+        ClampToScreen();
     }
 
     // ============ 缩放位移计算 ============
+
     private void HandleResizeMove(MouseEventArgs e)
     {
         var currentScreenPos = PointToScreen(e.GetPosition(this));
@@ -395,6 +424,15 @@ public partial class StickyNoteWindow : Window
                 newHeight = Math.Max(MinHeight, _startHeight + deltaY);
                 break;
         }
+
+        // 四边不超屏幕工作区（统一 DIU）
+        var wa = GetWorkingAreaInDiu();
+        if (newLeft < wa.Left) newLeft = wa.Left;
+        if (newTop < wa.Top) newTop = wa.Top;
+        if (newLeft + newWidth > wa.Right) newWidth = wa.Right - newLeft;
+        if (newTop + newHeight > wa.Bottom) newHeight = wa.Bottom - newTop;
+        newWidth = Math.Max(MinWidth, newWidth);
+        newHeight = Math.Max(MinHeight, newHeight);
 
         Left = newLeft;
         Top = newTop;
@@ -458,6 +496,122 @@ public partial class StickyNoteWindow : Window
             ResizeDirection.TopRight or ResizeDirection.BottomLeft => Cursors.SizeNESW,
             _ => null
         };
+    }
+
+    // ============ DPI 换算（物理像素 → DIU） ============
+
+    /// <summary>获取当前窗口 DPI 缩放矩阵（设备像素 → DIU）。</summary>
+    private System.Windows.Media.Matrix GetTransformFromDevice()
+    {
+        try
+        {
+            var source = PresentationSource.FromVisual(this);
+            if (source?.CompositionTarget != null)
+                return source.CompositionTarget.TransformFromDevice;
+        }
+        catch { }
+        return System.Windows.Media.Matrix.Identity;
+    }
+
+    private Size PhysicalToDiuSize(double physicalW, double physicalH)
+    {
+        var m = GetTransformFromDevice();
+        return new Size(physicalW * m.M11, physicalH * m.M22);
+    }
+
+    private Point PhysicalToDiuPoint(double physicalX, double physicalY)
+    {
+        var m = GetTransformFromDevice();
+        return new Point(physicalX * m.M11, physicalY * m.M22);
+    }
+
+    // ============ 屏幕信息（DIU） ============
+
+    private WinScreen? GetCurrentScreen()
+    {
+        try
+        {
+            var handle = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+            return WinScreen.FromHandle(handle) ?? WinScreen.PrimaryScreen;
+        }
+        catch
+        {
+            return WinScreen.PrimaryScreen;
+        }
+    }
+
+    /// <summary>获取当前屏幕工作区（DIU 坐标系）。</summary>
+    private Rect GetWorkingAreaInDiu()
+    {
+        var screen = GetCurrentScreen();
+        if (screen == null)
+            return SystemParameters.WorkArea; // 已是 DIU
+        var wa = screen.WorkingArea;          // 物理像素
+        var tl = PhysicalToDiuPoint(wa.Left, wa.Top);
+        var sz = PhysicalToDiuSize(wa.Width, wa.Height);
+        return new Rect(tl.X, tl.Y, sz.Width, sz.Height);
+    }
+
+    /// <summary>获取主屏幕工作区（DIU），供离屏检测用。</summary>
+    private Rect GetPrimaryWorkingAreaInDiu()
+    {
+        var screen = WinScreen.PrimaryScreen;
+        if (screen == null)
+            return SystemParameters.WorkArea;
+        var wa = screen.WorkingArea;
+        var tl = PhysicalToDiuPoint(wa.Left, wa.Top);
+        var sz = PhysicalToDiuSize(wa.Width, wa.Height);
+        return new Rect(tl.X, tl.Y, sz.Width, sz.Height);
+    }
+
+    /// <summary>检查窗口（DIU）是否和任一屏幕有交集。</summary>
+    private bool IsOnAnyScreen(double left, double top, double width, double height)
+    {
+        foreach (var s in WinScreen.AllScreens)
+        {
+            var wa = s.WorkingArea;
+            var tl = PhysicalToDiuPoint(wa.Left, wa.Top);
+            var sz = PhysicalToDiuSize(wa.Width, wa.Height);
+            double ol = Math.Max(left, tl.X);
+            double ot = Math.Max(top, tl.Y);
+            double or = Math.Min(left + width, tl.X + sz.Width);
+            double ob = Math.Min(top + height, tl.Y + sz.Height);
+            if (or - ol >= 100 && ob - ot >= 28) return true;
+        }
+        return false;
+    }
+
+    // ============ 边界钳制（统一 DIU） ============
+
+    /// <summary>将窗口约束在屏幕工作区内，四边对称钳制（全部 DIU）。</summary>
+    private void ClampToScreen()
+    {
+        if (_isClamping || _isRestoring) return;
+        _isClamping = true;
+
+        try
+        {
+            var wa = GetWorkingAreaInDiu();
+
+            // 尺寸
+            if (Width > wa.Width) Width = wa.Width;
+            if (Height > wa.Height) Height = wa.Height;
+
+            // 左/上
+            if (Left < wa.Left) Left = wa.Left;
+            if (Top < wa.Top) Top = wa.Top;
+            // 右/下
+            if (Left + Width > wa.Right) Left = wa.Right - Width;
+            if (Top + Height > wa.Bottom) Top = wa.Bottom - Height;
+
+            // 下限
+            if (Width < MinWidth) Width = MinWidth;
+            if (Height < MinHeight) Height = MinHeight;
+        }
+        finally
+        {
+            _isClamping = false;
+        }
     }
 
     private enum ResizeDirection

@@ -7,7 +7,7 @@
         Background="Transparent"
         Width="320" Height="280"
         MinWidth="150" MinHeight="120"
-        WindowStartupLocation="CenterScreen"
+        WindowStartupLocation="Manual"
         ShowInTaskbar="True"
         PreviewMouseMove="Window_PreviewMouseMove"
         PreviewMouseLeftButtonDown="Window_PreviewMouseLeftButtonDown"
